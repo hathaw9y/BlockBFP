@@ -1,0 +1,99 @@
+import argparse
+import sys
+from pathlib import Path
+
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from llama_bfp_gptq import calibrate_and_apply_bfp_gptq_to_llama, save_bfp_gptq_weights
+from llama_fuse import fuse_llama_model
+from llama_rotation import rotate_llama_model
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model-name", default="meta-llama/Llama-2-7b-hf")
+    parser.add_argument("--attn-implementation", default="eager")
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--rotation-block-size", type=int, default=32)
+    parser.add_argument("--rotation-seed", type=int, default=0)
+    parser.add_argument("--no-online-o-proj-had", action="store_true")
+    parser.add_argument("--no-online-down-proj-had", action="store_true")
+    parser.add_argument("--bfp-gptq-block-size", type=int, default=32)
+    parser.add_argument("--bfp-gptq-mantissa-bits", type=int, default=5)
+    parser.add_argument("--bfp-gptq-lambda", type=float, default=1e-4)
+    parser.add_argument("--bfp-gptq-calib-samples", type=int, default=128)
+    parser.add_argument("--bfp-gptq-calib-seqlen", type=int, default=2048)
+    parser.add_argument("--bfp-gptq-calib-seed", type=int, default=0)
+    parser.add_argument("--bfp-gptq-calib-split", default="train")
+    parser.add_argument("--local-files-only", action="store_true")
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model_name,
+        local_files_only=args.local_files_only,
+    )
+
+    model_kwargs = {
+        "local_files_only": args.local_files_only,
+        "torch_dtype": torch.float16 if torch.cuda.is_available() else torch.float32,
+        "attn_implementation": args.attn_implementation,
+    }
+    if torch.cuda.is_available():
+        model_kwargs["device_map"] = "auto"
+
+    model = AutoModelForCausalLM.from_pretrained(args.model_name, **model_kwargs)
+
+    fuse_llama_model(model)
+    rotate_llama_model(
+        model,
+        rotation_block_size=args.rotation_block_size,
+        seed=args.rotation_seed,
+        online_o_proj_had=not args.no_online_o_proj_had,
+        online_down_proj_had=not args.no_online_down_proj_had,
+    )
+
+    corrected = calibrate_and_apply_bfp_gptq_to_llama(
+        model,
+        tokenizer,
+        calib_split=args.bfp_gptq_calib_split,
+        calib_samples=args.bfp_gptq_calib_samples,
+        calib_seqlen=args.bfp_gptq_calib_seqlen,
+        calib_seed=args.bfp_gptq_calib_seed,
+        block_size=args.bfp_gptq_block_size,
+        mantissa_bits=args.bfp_gptq_mantissa_bits,
+        lambda_reg=args.bfp_gptq_lambda,
+    )
+
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    save_bfp_gptq_weights(
+        model,
+        output,
+        metadata={
+            "model_name": args.model_name,
+            "fused": True,
+            "rotated": True,
+            "rotation_block_size": args.rotation_block_size,
+            "rotation_seed": args.rotation_seed,
+            "bfp_gptq_block_size": args.bfp_gptq_block_size,
+            "bfp_gptq_mantissa_bits": args.bfp_gptq_mantissa_bits,
+            "bfp_gptq_lambda": args.bfp_gptq_lambda,
+            "bfp_gptq_calib_split": args.bfp_gptq_calib_split,
+            "bfp_gptq_calib_samples": args.bfp_gptq_calib_samples,
+            "bfp_gptq_calib_seqlen": args.bfp_gptq_calib_seqlen,
+            "bfp_gptq_calib_seed": args.bfp_gptq_calib_seed,
+            "corrected_linears": corrected,
+        },
+    )
+    print(f"Saved BFP-GPTQ corrected fused+rotated weights to {output}")
+
+
+if __name__ == "__main__":
+    main()

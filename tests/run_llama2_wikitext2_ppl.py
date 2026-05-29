@@ -8,6 +8,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from llama_bfp import add_bfp_to_llama
+from llama_bfp_gptq import calibrate_and_apply_bfp_gptq_to_llama, load_bfp_gptq_weights
 from llama_fuse import fuse_llama_model
 from llama_rotation import rotate_llama_model
 from ppl_eval import evaluate_wikitext2_ppl
@@ -40,12 +41,25 @@ def parse_args():
     parser.add_argument("--k-clip-ratio", type=float, default=1.0)
     parser.add_argument("--no-qk-online-had", action="store_true")
     parser.add_argument("--qk-online-had-only", action="store_true")
+    parser.add_argument("--bfp-gptq", action="store_true")
+    parser.add_argument("--bfp-gptq-load", default=None)
+    parser.add_argument("--bfp-gptq-block-size", type=int, default=32)
+    parser.add_argument("--bfp-gptq-mantissa-bits", type=int, default=5)
+    parser.add_argument("--bfp-gptq-lambda", type=float, default=1e-4)
+    parser.add_argument("--bfp-gptq-calib-samples", type=int, default=128)
+    parser.add_argument("--bfp-gptq-calib-seqlen", type=int, default=2048)
+    parser.add_argument("--bfp-gptq-calib-seed", type=int, default=0)
+    parser.add_argument("--bfp-gptq-calib-split", default="train")
     parser.add_argument("--local-files-only", action="store_true")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    if args.bfp_gptq and not args.rotate:
+        raise ValueError("--bfp-gptq requires --rotate so W is the Hadamard-rotated weight.")
+    if args.bfp_gptq_load is not None and not args.rotate:
+        raise ValueError("--bfp-gptq-load requires --rotate so the saved rotated weights match.")
 
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_name,
@@ -61,7 +75,14 @@ def main():
         model_kwargs["device_map"] = "auto"
 
     model = AutoModelForCausalLM.from_pretrained(args.model_name, **model_kwargs)
-    quant_or_qk_enabled = args.bfp or args.v_bits is not None or args.k_bits is not None or args.qk_online_had_only
+    quant_or_qk_enabled = (
+        args.bfp
+        or args.v_bits is not None
+        or args.k_bits is not None
+        or args.qk_online_had_only
+        or args.bfp_gptq
+        or args.bfp_gptq_load is not None
+    )
     if args.fuse or args.rotate:
         fuse_llama_model(model)
     if args.rotate:
@@ -72,6 +93,22 @@ def main():
             online_o_proj_had=not args.no_online_o_proj_had,
             online_down_proj_had=not args.no_online_down_proj_had,
         )
+    if args.bfp_gptq:
+        corrected = calibrate_and_apply_bfp_gptq_to_llama(
+            model,
+            tokenizer,
+            calib_split=args.bfp_gptq_calib_split,
+            calib_samples=args.bfp_gptq_calib_samples,
+            calib_seqlen=args.bfp_gptq_calib_seqlen,
+            calib_seed=args.bfp_gptq_calib_seed,
+            block_size=args.bfp_gptq_block_size,
+            mantissa_bits=args.bfp_gptq_mantissa_bits,
+            lambda_reg=args.bfp_gptq_lambda,
+        )
+        print(f"BFP-GPTQ corrected linears on fused+rotated weights: {corrected}")
+    if args.bfp_gptq_load is not None:
+        loaded = load_bfp_gptq_weights(model, args.bfp_gptq_load)
+        print(f"BFP-GPTQ loaded corrected fused+rotated linears: {loaded}")
     if quant_or_qk_enabled:
         activation_bits = args.a_bits if args.bfp and not args.no_a_bfp else None
         counts = add_bfp_to_llama(
@@ -104,6 +141,10 @@ def main():
     )
     if args.qk_online_had_only and not args.bfp and args.v_bits is None and args.k_bits is None:
         fuse_label = "rotated+qk-had" if args.rotate else "qk-had"
+    elif args.bfp_gptq and not args.bfp and args.v_bits is None and args.k_bits is None:
+        fuse_label = "rotated+bfp-gptq" if args.rotate else "bfp-gptq"
+    elif args.bfp_gptq_load is not None and not args.bfp and args.v_bits is None and args.k_bits is None:
+        fuse_label = "rotated+bfp-gptq-loaded"
     elif quant_or_qk_enabled:
         fuse_label = "rotated+bfp" if args.rotate else "bfp"
     elif args.rotate:
