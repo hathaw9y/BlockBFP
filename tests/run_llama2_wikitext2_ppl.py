@@ -16,6 +16,7 @@ from ppl_eval import evaluate_wikitext2_ppl
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-name", default="meta-llama/Llama-2-7b-hf")
+    parser.add_argument("--attn-implementation", default="eager")
     parser.add_argument("--split", default="test")
     parser.add_argument("--max-length", type=int, default=2048)
     parser.add_argument("--stride", type=int, default=2048)
@@ -54,6 +55,7 @@ def main():
     model_kwargs = {
         "local_files_only": args.local_files_only,
         "torch_dtype": torch.float16 if torch.cuda.is_available() else torch.float32,
+        "attn_implementation": args.attn_implementation,
     }
     if torch.cuda.is_available():
         model_kwargs["device_map"] = "auto"
