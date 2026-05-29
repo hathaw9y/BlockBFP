@@ -7,6 +7,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from llama_fuse import fuse_llama_model
 from ppl_eval import evaluate_wikitext2_ppl
 
 
@@ -17,6 +18,7 @@ def parse_args():
     parser.add_argument("--max-length", type=int, default=2048)
     parser.add_argument("--stride", type=int, default=2048)
     parser.add_argument("--max-eval-tokens", type=int, default=0)
+    parser.add_argument("--fuse", action="store_true")
     parser.add_argument("--local-files-only", action="store_true")
     return parser.parse_args()
 
@@ -37,6 +39,8 @@ def main():
         model_kwargs["device_map"] = "auto"
 
     model = AutoModelForCausalLM.from_pretrained(args.model_name, **model_kwargs)
+    if args.fuse:
+        fuse_llama_model(model)
 
     max_eval_tokens = None if args.max_eval_tokens <= 0 else args.max_eval_tokens
     ppl = evaluate_wikitext2_ppl(
@@ -47,7 +51,8 @@ def main():
         stride=args.stride,
         max_eval_tokens=max_eval_tokens,
     )
-    print(f"WikiText-2 {args.split} PPL: {ppl:.4f}")
+    fuse_label = "fused" if args.fuse else "baseline"
+    print(f"WikiText-2 {args.split} PPL ({fuse_label}): {ppl:.4f}")
 
 
 if __name__ == "__main__":
