@@ -13,6 +13,7 @@ from llama_bfp import (
     add_output_bfp_to_linear,
     bfp_fake_quant,
     clamp_to_dtype_range,
+    maybe_bfp_fake_quant,
     resolve_bfp_block_size,
 )
 from llama_rotation import apply_hadamard_to_last_dim
@@ -74,6 +75,13 @@ class LlamaBFPTest(unittest.TestCase):
         actual = bfp_fake_quant(x, bits=4, block_size=4)
 
         self.assertEqual(actual.shape, x.shape)
+
+    def test_maybe_bfp_fake_quant_can_disable_quantization(self):
+        x = torch.randn(2, 5)
+
+        actual = maybe_bfp_fake_quant(x, bits=None, block_size=4)
+
+        self.assertIs(actual, x)
 
     def test_bfp_fake_quant_keeps_non_finite_inputs_from_creating_nan(self):
         x = torch.tensor([[float("inf"), float("-inf"), float("nan"), 1.0]], dtype=torch.float16)

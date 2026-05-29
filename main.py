@@ -36,4 +36,5 @@ def main():
             k_groupsize=getattr(args, "k_groupsize", -1),
             k_clip_ratio=getattr(args, "k_clip_ratio", 1.0),
             qk_online_had=not getattr(args, "no_qk_online_had", False),
+            force_qk_online_had=getattr(args, "qk_online_had_only", False),
         )

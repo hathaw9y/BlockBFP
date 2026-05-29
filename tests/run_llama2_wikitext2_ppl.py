@@ -38,6 +38,7 @@ def parse_args():
     parser.add_argument("--k-groupsize", type=int, default=-1)
     parser.add_argument("--k-clip-ratio", type=float, default=1.0)
     parser.add_argument("--no-qk-online-had", action="store_true")
+    parser.add_argument("--qk-online-had-only", action="store_true")
     parser.add_argument("--local-files-only", action="store_true")
     return parser.parse_args()
 
@@ -58,7 +59,7 @@ def main():
         model_kwargs["device_map"] = "auto"
 
     model = AutoModelForCausalLM.from_pretrained(args.model_name, **model_kwargs)
-    bfp_enabled = args.bfp or args.v_bits is not None or args.k_bits is not None
+    bfp_enabled = args.bfp or args.v_bits is not None or args.k_bits is not None or args.qk_online_had_only
     if args.fuse or args.rotate or bfp_enabled:
         fuse_llama_model(model)
     if args.rotate or bfp_enabled:
@@ -82,6 +83,7 @@ def main():
             k_groupsize=args.k_groupsize,
             k_clip_ratio=args.k_clip_ratio,
             qk_online_had=not args.no_qk_online_had,
+            force_qk_online_had=args.qk_online_had_only,
         )
         print(
             "BFP enabled: "

@@ -69,6 +69,12 @@ def bfp_fake_quant(x, bits=4, block_size=BFP_DEFAULT_BLOCK_SIZE, clip_ratio=1.0)
     return xhat.reshape(orig_shape).to(dtype=orig_dtype)
 
 
+def maybe_bfp_fake_quant(x, bits=4, block_size=BFP_DEFAULT_BLOCK_SIZE, clip_ratio=1.0):
+    if bits is None or bits <= 0:
+        return x
+    return bfp_fake_quant(x, bits=bits, block_size=block_size, clip_ratio=clip_ratio)
+
+
 def _bfp_input_pre_hook(bits, block_size, clip_ratio):
     def hook(module, inputs):
         if len(inputs) == 0:
@@ -213,7 +219,7 @@ def _build_k_bfp_forward(attn, bits, block_size, clip_ratio, qk_online_had):
         if qk_online_had:
             query_states = apply_hadamard_to_last_dim(query_states, block_size)
             key_states = apply_hadamard_to_last_dim(key_states, block_size)
-        key_states = bfp_fake_quant(
+        key_states = maybe_bfp_fake_quant(
             key_states,
             bits=bits,
             block_size=block_size,
@@ -308,6 +314,7 @@ def add_bfp_to_llama(
     k_groupsize=-1,
     k_clip_ratio=1.0,
     qk_online_had=True,
+    force_qk_online_had=False,
 ):
     counts = {"activation": 0, "v": 0, "k": 0}
 
@@ -325,7 +332,7 @@ def add_bfp_to_llama(
             groupsize=v_groupsize,
             clip_ratio=v_clip_ratio,
         )
-    if k_bits is not None:
+    if k_bits is not None or force_qk_online_had:
         counts["k"] = add_k_bfp_to_llama(
             model,
             bits=k_bits,
