@@ -1,5 +1,8 @@
 import torch, math
-import fast_hadamard_transform
+try:
+    import fast_hadamard_transform
+except ImportError:
+    fast_hadamard_transform = None
 # Adapted from https://github.com/Cornell-RelaxML/quip-sharp/blob/main/lib/utils/matmul_had.py
 
 def get_hadK(n, transpose=False):
@@ -76,7 +79,7 @@ def matmul_hadU(X, transpose=False):
         # Use bcast instead
         input = hadK.view(1, K, K).to(input) @ input
 
-    return input.view(X.shape) / torch.tensor(n).sqrt()
+    return input.view(X.shape) / torch.tensor(n, device=X.device, dtype=X.dtype).sqrt()
 
 
 def matmul_hadUt(X):
@@ -98,6 +101,8 @@ def random_hadamard_matrix(size, device, block_size=None):
     return Q.to(device)
 
 def matmul_hadU_cuda(X, hadK, K):
+    if fast_hadamard_transform is None:
+        raise ImportError("fast_hadamard_transform is required for CUDA Hadamard transforms.")
     n = X.shape[-1]
     if K == 1:
         return fast_hadamard_transform.hadamard_transform(X.contiguous(), 1.0/torch.tensor(n).sqrt()) 
@@ -114,6 +119,8 @@ def matmul_hadUt_cuda(X, hadK, K):
 
 
 def apply_exact_had_to_linear(module, had_dim=-1, output=False):
+    if fast_hadamard_transform is None:
+        raise ImportError("fast_hadamard_transform is required for CUDA Hadamard transforms.")
     assert isinstance(module, torch.nn.Linear)
     in_features, out_features = module.in_features, module.out_features
     
@@ -150,6 +157,8 @@ def apply_exact_had_to_linear(module, had_dim=-1, output=False):
 
 
 def apply_block_had_to_linear(module, block_size, output=False):
+    if fast_hadamard_transform is None:
+        raise ImportError("fast_hadamard_transform is required for CUDA Hadamard transforms.")
     assert isinstance(module, torch.nn.Linear)
     assert is_pow2(block_size), "Hadamard block_size must be a power of 2!"
 
