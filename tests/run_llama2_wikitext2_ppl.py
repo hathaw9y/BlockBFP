@@ -7,6 +7,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from llama_bfp import add_bfp_to_llama
 from llama_fuse import fuse_llama_model
 from llama_rotation import rotate_llama_model
 from ppl_eval import evaluate_wikitext2_ppl
@@ -25,6 +26,17 @@ def parse_args():
     parser.add_argument("--rotation-seed", type=int, default=0)
     parser.add_argument("--no-online-o-proj-had", action="store_true")
     parser.add_argument("--no-online-down-proj-had", action="store_true")
+    parser.add_argument("--bfp", action="store_true")
+    parser.add_argument("--a-bits", type=int, default=4)
+    parser.add_argument("--a-groupsize", type=int, default=-1)
+    parser.add_argument("--a-clip-ratio", type=float, default=1.0)
+    parser.add_argument("--no-a-bfp", action="store_true")
+    parser.add_argument("--v-bits", type=int, default=None)
+    parser.add_argument("--v-groupsize", type=int, default=-1)
+    parser.add_argument("--v-clip-ratio", type=float, default=1.0)
+    parser.add_argument("--k-bits", type=int, default=None)
+    parser.add_argument("--k-groupsize", type=int, default=-1)
+    parser.add_argument("--k-clip-ratio", type=float, default=1.0)
     parser.add_argument("--local-files-only", action="store_true")
     return parser.parse_args()
 
@@ -45,15 +57,33 @@ def main():
         model_kwargs["device_map"] = "auto"
 
     model = AutoModelForCausalLM.from_pretrained(args.model_name, **model_kwargs)
-    if args.fuse or args.rotate:
+    bfp_enabled = args.bfp or args.v_bits is not None or args.k_bits is not None
+    if args.fuse or args.rotate or bfp_enabled:
         fuse_llama_model(model)
-    if args.rotate:
+    if args.rotate or bfp_enabled:
         rotate_llama_model(
             model,
             rotation_block_size=args.rotation_block_size,
             seed=args.rotation_seed,
             online_o_proj_had=not args.no_online_o_proj_had,
             online_down_proj_had=not args.no_online_down_proj_had,
+        )
+    if bfp_enabled:
+        counts = add_bfp_to_llama(
+            model,
+            a_bits=None if args.no_a_bfp else args.a_bits,
+            a_groupsize=args.a_groupsize,
+            a_clip_ratio=args.a_clip_ratio,
+            v_bits=args.v_bits,
+            v_groupsize=args.v_groupsize,
+            v_clip_ratio=args.v_clip_ratio,
+            k_bits=args.k_bits,
+            k_groupsize=args.k_groupsize,
+            k_clip_ratio=args.k_clip_ratio,
+        )
+        print(
+            "BFP enabled: "
+            f"activation={counts['activation']}, v={counts['v']}, k={counts['k']}"
         )
 
     max_eval_tokens = None if args.max_eval_tokens <= 0 else args.max_eval_tokens
@@ -65,7 +95,9 @@ def main():
         stride=args.stride,
         max_eval_tokens=max_eval_tokens,
     )
-    if args.rotate:
+    if bfp_enabled:
+        fuse_label = "fused+rotated+bfp"
+    elif args.rotate:
         fuse_label = "fused+rotated"
     elif args.fuse:
         fuse_label = "fused"

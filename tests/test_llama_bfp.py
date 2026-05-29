@@ -1,0 +1,105 @@
+import sys
+import unittest
+from pathlib import Path
+
+import torch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from llama_bfp import (
+    BFP_DEFAULT_BLOCK_SIZE,
+    add_activation_bfp_to_llama,
+    add_bfp_to_llama,
+    add_output_bfp_to_linear,
+    bfp_fake_quant,
+    resolve_bfp_block_size,
+)
+
+
+class DummySelfAttn(torch.nn.Module):
+    def __init__(self, hidden_size):
+        super().__init__()
+        self.q_proj = torch.nn.Linear(hidden_size, hidden_size)
+        self.k_proj = torch.nn.Linear(hidden_size, hidden_size)
+        self.v_proj = torch.nn.Linear(hidden_size, hidden_size)
+        self.o_proj = torch.nn.Linear(hidden_size, hidden_size)
+
+
+class DummyMLP(torch.nn.Module):
+    def __init__(self, hidden_size):
+        super().__init__()
+        self.up_proj = torch.nn.Linear(hidden_size, hidden_size)
+        self.gate_proj = torch.nn.Linear(hidden_size, hidden_size)
+        self.down_proj = torch.nn.Linear(hidden_size, hidden_size)
+
+
+class DummyLayer(torch.nn.Module):
+    def __init__(self, hidden_size):
+        super().__init__()
+        self.self_attn = DummySelfAttn(hidden_size)
+        self.mlp = DummyMLP(hidden_size)
+
+
+class DummyInnerModel(torch.nn.Module):
+    def __init__(self, hidden_size):
+        super().__init__()
+        self.layers = torch.nn.ModuleList([DummyLayer(hidden_size)])
+
+
+class DummyLlama(torch.nn.Module):
+    def __init__(self, hidden_size=8):
+        super().__init__()
+        self.model = DummyInnerModel(hidden_size)
+        self.lm_head = torch.nn.Linear(hidden_size, hidden_size)
+
+
+class LlamaBFPTest(unittest.TestCase):
+    def test_groupsize_minus_one_uses_default_block_size(self):
+        self.assertEqual(resolve_bfp_block_size(-1), BFP_DEFAULT_BLOCK_SIZE)
+
+    def test_bfp_fake_quant_uses_signed_four_bit_range(self):
+        x = torch.tensor([[-9.0, -8.0, -7.0, 0.0, 7.0, 8.0]])
+
+        actual = bfp_fake_quant(x, bits=4, block_size=8)
+
+        self.assertEqual(actual.shape, x.shape)
+        self.assertTrue(torch.all(actual <= 8.0))
+        self.assertTrue(torch.all(actual >= -8.0))
+
+    def test_bfp_fake_quant_pads_and_slices_last_dim(self):
+        x = torch.randn(2, 5)
+
+        actual = bfp_fake_quant(x, bits=4, block_size=4)
+
+        self.assertEqual(actual.shape, x.shape)
+
+    def test_activation_bfp_wraps_linears_but_skips_lm_head(self):
+        model = DummyLlama()
+
+        wrapped = add_activation_bfp_to_llama(model, bits=4, groupsize=4)
+
+        self.assertEqual(wrapped, 7)
+        self.assertTrue(hasattr(model.model.layers[0].self_attn.q_proj, "_bfp_input_handle"))
+        self.assertFalse(hasattr(model.lm_head, "_bfp_input_handle"))
+
+    def test_output_bfp_quantizes_linear_output(self):
+        linear = torch.nn.Linear(4, 4)
+        x = torch.randn(2, 4)
+
+        add_output_bfp_to_linear(linear, bits=4, groupsize=4)
+        actual = linear(x)
+
+        self.assertEqual(actual.shape, (2, 4))
+
+    def test_add_bfp_to_llama_counts_activation_and_v(self):
+        model = DummyLlama()
+
+        counts = add_bfp_to_llama(model, a_bits=4, a_groupsize=4, v_bits=4, v_groupsize=4)
+
+        self.assertEqual(counts["activation"], 7)
+        self.assertEqual(counts["v"], 1)
+        self.assertEqual(counts["k"], 0)
+
+
+if __name__ == "__main__":
+    unittest.main()
