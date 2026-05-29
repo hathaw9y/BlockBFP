@@ -146,11 +146,12 @@ def _init_stats(in_features, block_size, device):
     return {"in_features": in_features, "block_size": block_size, "blocks": blocks}
 
 
-def _make_stats_hook(name, store, block_size, mantissa_bits):
+def _make_stats_hook(name, store, block_size, mantissa_bits, quantize_input=False):
     def hook(module, inputs):
         if len(inputs) == 0:
             return
-        x = inputs[0].detach().reshape(-1, inputs[0].shape[-1]).float()
+        raw_input = inputs[0]
+        x = raw_input.detach().reshape(-1, raw_input.shape[-1]).float()
         if name not in store:
             store[name] = _init_stats(x.shape[1], block_size, x.device)
 
@@ -165,6 +166,32 @@ def _make_stats_hook(name, store, block_size, mantissa_bits):
             block["hessian"] += 2 * (X_Q_b @ X_Q_b.t())
             block["magnitude"] += X_b.abs().sum(dim=1)
             block["count"] += X_b.shape[1]
+
+        if quantize_input:
+            return (
+                quant_bfp_mantissa(
+                    raw_input,
+                    block_size=block_size,
+                    mantissa_bits=mantissa_bits,
+                ),
+                *inputs[1:],
+            )
+
+    return hook
+
+
+def _make_activation_quant_hook(block_size, mantissa_bits):
+    def hook(module, inputs):
+        if len(inputs) == 0:
+            return
+        return (
+            quant_bfp_mantissa(
+                inputs[0],
+                block_size=block_size,
+                mantissa_bits=mantissa_bits,
+            ),
+            *inputs[1:],
+        )
 
     return hook
 
@@ -395,6 +422,7 @@ def calibrate_and_apply_bfp_gptq_to_llama_layerwise(
     mantissa_bits=5,
     lambda_reg=1e-4,
     quantize_weight=True,
+    quantize_forward_activations=True,
     show_progress=True,
 ):
     base_model = _get_llama_base_model(model)
@@ -437,7 +465,15 @@ def calibrate_and_apply_bfp_gptq_to_llama_layerwise(
             targets = list(_iter_layer_target_linears(layer, layer_name))
             stats = {}
             handles = [
-                module.register_forward_pre_hook(_make_stats_hook(name, stats, block_size, mantissa_bits))
+                module.register_forward_pre_hook(
+                    _make_stats_hook(
+                        name,
+                        stats,
+                        block_size,
+                        mantissa_bits,
+                        quantize_input=quantize_forward_activations,
+                    )
+                )
                 for name, module in targets
             ]
             try:
@@ -468,8 +504,20 @@ def calibrate_and_apply_bfp_gptq_to_llama_layerwise(
                 leave=False,
                 disable=not show_progress,
             )
-            for hidden in output_iter:
-                next_hidden_states.append(_run_decoder_layer(base_model, layer, hidden).detach().cpu())
+            quant_handles = []
+            if quantize_forward_activations:
+                quant_handles = [
+                    module.register_forward_pre_hook(
+                        _make_activation_quant_hook(block_size, mantissa_bits)
+                    )
+                    for _, module in targets
+                ]
+            try:
+                for hidden in output_iter:
+                    next_hidden_states.append(_run_decoder_layer(base_model, layer, hidden).detach().cpu())
+            finally:
+                for handle in quant_handles:
+                    handle.remove()
             hidden_states = next_hidden_states
 
             if torch.cuda.is_available():
@@ -499,6 +547,7 @@ def calibrate_and_apply_bfp_gptq_to_llama(
     include_lm_head=False,
     show_progress=True,
     calib_mode="layerwise",
+    quantize_forward_activations=True,
 ):
     if calib_mode == "layerwise":
         if include_lm_head:
@@ -514,6 +563,7 @@ def calibrate_and_apply_bfp_gptq_to_llama(
             mantissa_bits=mantissa_bits,
             lambda_reg=lambda_reg,
             quantize_weight=quantize_weight,
+            quantize_forward_activations=quantize_forward_activations,
             show_progress=show_progress,
         )
     if calib_mode != "global":

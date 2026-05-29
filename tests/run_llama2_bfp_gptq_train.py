@@ -7,9 +7,16 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from llama_bfp import add_bfp_to_llama
 from llama_bfp_gptq import calibrate_and_apply_bfp_gptq_to_llama, save_bfp_gptq_weights
 from llama_fuse import fuse_llama_model
 from llama_rotation import rotate_llama_model
+
+
+def resolve_optional_bits(explicit_bits, default_bits=None):
+    if explicit_bits is None:
+        return default_bits
+    return explicit_bits if explicit_bits > 0 else None
 
 
 def parse_args():
@@ -21,6 +28,14 @@ def parse_args():
     parser.add_argument("--rotation-seed", type=int, default=0)
     parser.add_argument("--no-online-o-proj-had", action="store_true")
     parser.add_argument("--no-online-down-proj-had", action="store_true")
+    parser.add_argument("--bfp", action="store_true")
+    parser.add_argument("--v-bits", type=int, default=None)
+    parser.add_argument("--v-groupsize", type=int, default=-1)
+    parser.add_argument("--v-clip-ratio", type=float, default=1.0)
+    parser.add_argument("--k-bits", type=int, default=None)
+    parser.add_argument("--k-groupsize", type=int, default=-1)
+    parser.add_argument("--k-clip-ratio", type=float, default=1.0)
+    parser.add_argument("--no-qk-online-had", action="store_true")
     parser.add_argument("--bfp-gptq-block-size", type=int, default=32)
     parser.add_argument("--bfp-gptq-mantissa-bits", type=int, default=5)
     parser.add_argument("--bfp-gptq-lambda", type=float, default=1e-4)
@@ -30,6 +45,7 @@ def parse_args():
     parser.add_argument("--bfp-gptq-calib-seed", type=int, default=0)
     parser.add_argument("--bfp-gptq-calib-split", default="train")
     parser.add_argument("--bfp-gptq-calib-mode", choices=["layerwise", "global"], default="layerwise")
+    parser.add_argument("--no-bfp-gptq-forward-activations", action="store_true")
     parser.add_argument("--local-files-only", action="store_true")
     return parser.parse_args()
 
@@ -61,6 +77,26 @@ def main():
         online_down_proj_had=not args.no_online_down_proj_had,
     )
 
+    default_kv_bits = 4 if args.bfp else None
+    v_bits = resolve_optional_bits(args.v_bits, default_kv_bits)
+    k_bits = resolve_optional_bits(args.k_bits, default_kv_bits)
+    if args.bfp or v_bits is not None or k_bits is not None:
+        counts = add_bfp_to_llama(
+            model,
+            a_bits=None,
+            v_bits=v_bits,
+            v_groupsize=args.v_groupsize,
+            v_clip_ratio=args.v_clip_ratio,
+            k_bits=k_bits,
+            k_groupsize=args.k_groupsize,
+            k_clip_ratio=args.k_clip_ratio,
+            qk_online_had=not args.no_qk_online_had,
+        )
+        print(
+            "BFP/QK calibration enabled: "
+            f"activation=internal, v={counts['v']}, k={counts['k']}"
+        )
+
     corrected = calibrate_and_apply_bfp_gptq_to_llama(
         model,
         tokenizer,
@@ -73,6 +109,7 @@ def main():
         lambda_reg=args.bfp_gptq_lambda,
         quantize_weight=not args.bfp_gptq_no_weight_quant,
         calib_mode=args.bfp_gptq_calib_mode,
+        quantize_forward_activations=not args.no_bfp_gptq_forward_activations,
     )
 
     output = Path(args.output)
@@ -86,6 +123,15 @@ def main():
             "rotated": True,
             "rotation_block_size": args.rotation_block_size,
             "rotation_seed": args.rotation_seed,
+            "runtime_bfp": args.bfp,
+            "runtime_activation_bfp": not args.no_bfp_gptq_forward_activations,
+            "runtime_v_bits": v_bits,
+            "runtime_v_groupsize": args.v_groupsize,
+            "runtime_v_clip_ratio": args.v_clip_ratio,
+            "runtime_k_bits": k_bits,
+            "runtime_k_groupsize": args.k_groupsize,
+            "runtime_k_clip_ratio": args.k_clip_ratio,
+            "runtime_qk_online_had": not args.no_qk_online_had,
             "bfp_gptq_block_size": args.bfp_gptq_block_size,
             "bfp_gptq_mantissa_bits": args.bfp_gptq_mantissa_bits,
             "bfp_gptq_lambda": args.bfp_gptq_lambda,
