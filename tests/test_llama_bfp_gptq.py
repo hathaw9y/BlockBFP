@@ -109,6 +109,27 @@ class LlamaBFPGPTQTest(unittest.TestCase):
         self.assertTrue(torch.all(torch.isfinite(W_corrected)))
         self.assertLessEqual(corrected_err, naive_err)
 
+    def test_correction_only_closed_form_reduces_error(self):
+        torch.manual_seed(3)
+        W = torch.randn(12, 16)
+        X = torch.randn(16, 512)
+        X_Q = quant_bfp_mantissa(X.t(), block_size=16, mantissa_bits=4).t()
+
+        W_corrected = correct_and_quantize_weight_bfp_gptq(
+            W,
+            X,
+            block_size=16,
+            mantissa_bits=4,
+            lambda_reg=1e-6,
+            quantize_weight=False,
+        )
+
+        target = W @ X
+        naive_err = torch.linalg.norm(target - W @ X_Q)
+        corrected_err = torch.linalg.norm(target - W_corrected @ X_Q)
+
+        self.assertLess(corrected_err, naive_err * 0.99)
+
     def test_stats_path_matches_activation_path_shape(self):
         torch.manual_seed(1)
         W = torch.randn(8, 16)
@@ -120,7 +141,7 @@ class LlamaBFPGPTQTest(unittest.TestCase):
             blocks.append(
                 {
                     "cross": ((X_b - X_Q_b) @ X_Q_b.t()).double(),
-                    "hessian": (2 * X_Q_b @ X_Q_b.t()).double(),
+                    "hessian": (X_Q_b @ X_Q_b.t()).double(),
                     "magnitude": X_b.abs().sum(dim=1).double(),
                     "count": X_b.shape[1],
                 }

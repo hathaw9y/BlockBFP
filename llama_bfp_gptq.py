@@ -84,7 +84,7 @@ def correct_and_quantize_weight_bfp_gptq(
         X_b = X_b[order, :]
         X_Q_b = X_Q_b[order, :]
 
-        H = 2 * (X_Q_b @ X_Q_b.t())
+        H = X_Q_b @ X_Q_b.t()
         H_inv = cholesky_inverse_stable(H, lambda_reg=lambda_reg)
 
         act_err = X_b - X_Q_b
@@ -186,7 +186,7 @@ def _make_stats_hook(
             ).t()
             block = stats["blocks"][block_idx]
             block["cross"] += (X_b - X_Q_b) @ X_Q_b.t()
-            block["hessian"] += 2 * (X_Q_b @ X_Q_b.t())
+            block["hessian"] += X_Q_b @ X_Q_b.t()
             block["magnitude"] += X_b.abs().sum(dim=1)
             block["count"] += X_b.shape[1]
 
