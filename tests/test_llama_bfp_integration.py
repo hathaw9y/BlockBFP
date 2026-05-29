@@ -24,6 +24,7 @@ class LlamaBFPIntegrationTest(unittest.TestCase):
             num_key_value_heads=4,
             max_position_embeddings=64,
         )
+        config.use_cache = False
         model = LlamaForCausalLM(config)
         model.eval()
 
@@ -47,6 +48,7 @@ class LlamaBFPIntegrationTest(unittest.TestCase):
         self.assertGreater(counts["activation"], 0)
         self.assertEqual(counts["v"], config.num_hidden_layers)
         self.assertEqual(counts["k"], config.num_hidden_layers)
+        self.assertTrue(model.model.layers[0].self_attn.bfp_k_qk_online_had)
 
 
 if __name__ == "__main__":

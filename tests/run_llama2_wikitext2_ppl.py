@@ -37,6 +37,7 @@ def parse_args():
     parser.add_argument("--k-bits", type=int, default=None)
     parser.add_argument("--k-groupsize", type=int, default=-1)
     parser.add_argument("--k-clip-ratio", type=float, default=1.0)
+    parser.add_argument("--no-qk-online-had", action="store_true")
     parser.add_argument("--local-files-only", action="store_true")
     return parser.parse_args()
 
@@ -80,6 +81,7 @@ def main():
             k_bits=args.k_bits,
             k_groupsize=args.k_groupsize,
             k_clip_ratio=args.k_clip_ratio,
+            qk_online_had=not args.no_qk_online_had,
         )
         print(
             "BFP enabled: "

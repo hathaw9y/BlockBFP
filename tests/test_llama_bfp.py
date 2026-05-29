@@ -14,6 +14,7 @@ from llama_bfp import (
     bfp_fake_quant,
     resolve_bfp_block_size,
 )
+from llama_rotation import apply_hadamard_to_last_dim
 
 
 class DummySelfAttn(torch.nn.Module):
@@ -72,6 +73,33 @@ class LlamaBFPTest(unittest.TestCase):
         actual = bfp_fake_quant(x, bits=4, block_size=4)
 
         self.assertEqual(actual.shape, x.shape)
+
+    def test_bfp_fake_quant_keeps_non_finite_inputs_from_creating_nan(self):
+        x = torch.tensor([[float("inf"), float("-inf"), float("nan"), 1.0]], dtype=torch.float16)
+
+        actual = bfp_fake_quant(x, bits=4, block_size=4)
+
+        self.assertTrue(torch.all(torch.isfinite(actual)))
+
+    def test_fp32_attention_scores_avoid_fp16_overflow_pattern(self):
+        query = torch.full((1, 1, 1, 128), 512.0, dtype=torch.float16)
+        key = torch.full((1, 1, 1, 128), 512.0, dtype=torch.float16)
+
+        scores = torch.matmul(query.float(), key.float().transpose(2, 3)) / (128 ** 0.5)
+
+        self.assertTrue(torch.all(torch.isfinite(scores)))
+
+    def test_qk_online_hadamard_preserves_attention_scores(self):
+        torch.manual_seed(0)
+        query = torch.randn(1, 2, 3, 8)
+        key = torch.randn(1, 2, 4, 8)
+        expected = torch.matmul(query, key.transpose(2, 3))
+
+        query_rot = apply_hadamard_to_last_dim(query, block_size=4)
+        key_rot = apply_hadamard_to_last_dim(key, block_size=4)
+        actual = torch.matmul(query_rot, key_rot.transpose(2, 3))
+
+        self.assertTrue(torch.allclose(actual, expected, atol=1e-5))
 
     def test_activation_bfp_wraps_linears_but_skips_lm_head(self):
         model = DummyLlama()

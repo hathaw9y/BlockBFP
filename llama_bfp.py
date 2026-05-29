@@ -4,6 +4,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from llama_rotation import apply_hadamard_to_last_dim
 
 try:
     from transformers.models.llama import modeling_llama
@@ -23,13 +24,21 @@ def resolve_bfp_block_size(groupsize):
 
 
 def bfp_fake_quant(x, bits=4, block_size=BFP_DEFAULT_BLOCK_SIZE, clip_ratio=1.0):
+    if bits < 2:
+        raise ValueError(f"BFP bits must be at least 2, got {bits}.")
+    if block_size <= 0:
+        raise ValueError(f"BFP block size must be positive, got {block_size}.")
+
     minq = -(2 ** (bits - 1))
     maxq = 2 ** (bits - 1) - 1
     orig_shape = x.shape
     orig_dtype = x.dtype
+    orig_finfo = torch.finfo(orig_dtype)
 
     compute_dtype = torch.float32 if x.dtype in (torch.float16, torch.bfloat16) else x.dtype
     x = x.to(dtype=compute_dtype)
+    finfo = torch.finfo(compute_dtype)
+    x = torch.nan_to_num(x, nan=0.0, posinf=finfo.max, neginf=-finfo.max)
 
     pad = (block_size - x.shape[-1] % block_size) % block_size
     if pad:
@@ -39,10 +48,14 @@ def bfp_fake_quant(x, bits=4, block_size=BFP_DEFAULT_BLOCK_SIZE, clip_ratio=1.0)
     xmax = torch.amax(torch.abs(x), dim=-1, keepdim=True) * clip_ratio
     safe_xmax = torch.where(xmax == 0, torch.ones_like(xmax), xmax)
     scale = 2 ** torch.ceil(torch.log2(safe_xmax / maxq))
+    scale = torch.clamp(scale, min=finfo.tiny, max=finfo.max)
     scale = torch.where(xmax == 0, torch.ones_like(scale), scale)
 
     q = torch.clamp(torch.round(x / scale), minq, maxq)
+    q = torch.nan_to_num(q, nan=0.0, posinf=maxq, neginf=minq)
     xhat = (q * scale).reshape(*orig_shape[:-1], -1)
+    xhat = torch.nan_to_num(xhat, nan=0.0, posinf=finfo.max, neginf=-finfo.max)
+    xhat = torch.clamp(xhat, min=orig_finfo.min, max=orig_finfo.max)
 
     if pad:
         xhat = xhat[..., : orig_shape[-1]]
@@ -141,7 +154,7 @@ def add_v_bfp_to_llama(model, bits=4, groupsize=-1, clip_ratio=1.0):
     return wrapped
 
 
-def _build_k_bfp_forward(attn, bits, block_size, clip_ratio):
+def _build_k_bfp_forward(attn, bits, block_size, clip_ratio, qk_online_had):
     if apply_rotary_pos_emb is None or repeat_kv is None:
         raise ImportError("K BFP requires transformers LLaMA attention helpers.")
 
@@ -190,6 +203,9 @@ def _build_k_bfp_forward(attn, bits, block_size, clip_ratio):
         else:
             cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        if qk_online_had:
+            query_states = apply_hadamard_to_last_dim(query_states, block_size)
+            key_states = apply_hadamard_to_last_dim(key_states, block_size)
         key_states = bfp_fake_quant(
             key_states,
             bits=bits,
@@ -209,15 +225,18 @@ def _build_k_bfp_forward(attn, bits, block_size, clip_ratio):
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+        attn_weights = torch.matmul(
+            query_states.float(),
+            key_states.float().transpose(2, 3),
+        ) / math.sqrt(self.head_dim)
 
         if attention_mask is not None:
             causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-            attn_weights = attn_weights + causal_mask
+            attn_weights = attn_weights + causal_mask.to(dtype=attn_weights.dtype)
 
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32)
         attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-        attn_output = torch.matmul(attn_weights, value_states)
+        attn_output = torch.matmul(attn_weights.to(value_states.dtype), value_states)
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
             raise ValueError(
@@ -243,7 +262,7 @@ def _build_k_bfp_forward(attn, bits, block_size, clip_ratio):
     return types.MethodType(forward, attn)
 
 
-def add_k_bfp_to_llama(model, bits=4, groupsize=-1, clip_ratio=1.0):
+def add_k_bfp_to_llama(model, bits=4, groupsize=-1, clip_ratio=1.0, qk_online_had=True):
     block_size = resolve_bfp_block_size(groupsize)
     wrapped = 0
 
@@ -251,10 +270,11 @@ def add_k_bfp_to_llama(model, bits=4, groupsize=-1, clip_ratio=1.0):
         attn = layer.self_attn
         if not hasattr(attn, "_original_forward"):
             attn._original_forward = attn.forward
-        attn.forward = _build_k_bfp_forward(attn, bits, block_size, clip_ratio)
+        attn.forward = _build_k_bfp_forward(attn, bits, block_size, clip_ratio, qk_online_had)
         attn.bfp_k_bits = bits
         attn.bfp_k_block_size = block_size
         attn.bfp_k_clip_ratio = clip_ratio
+        attn.bfp_k_qk_online_had = qk_online_had
         wrapped += 1
 
     return wrapped
@@ -272,6 +292,7 @@ def add_bfp_to_llama(
     k_bits=None,
     k_groupsize=-1,
     k_clip_ratio=1.0,
+    qk_online_had=True,
 ):
     counts = {"activation": 0, "v": 0, "k": 0}
 
@@ -295,6 +316,7 @@ def add_bfp_to_llama(
             bits=k_bits,
             groupsize=k_groupsize,
             clip_ratio=k_clip_ratio,
+            qk_online_had=qk_online_had,
         )
 
     return counts

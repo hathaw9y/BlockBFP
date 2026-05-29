@@ -17,7 +17,10 @@ def evaluate_wikitext2_ppl(
 ):
     """Evaluate causal language-model perplexity on WikiText-2."""
     was_training = model.training
+    original_use_cache = getattr(model.config, "use_cache", None)
     model.eval()
+    if original_use_cache is not None:
+        model.config.use_cache = False
 
     if device is None:
         device = next(model.parameters()).device
@@ -65,6 +68,11 @@ def evaluate_wikitext2_ppl(
 
         outputs = model(input_ids_slice, labels=target_ids)
         valid_tokens = (target_ids[:, 1:] != -100).sum().item()
+        if not torch.isfinite(outputs.loss):
+            raise FloatingPointError(
+                "Non-finite loss during WikiText-2 PPL evaluation at "
+                f"window start={start_loc}, end={end_loc}."
+            )
         total_nll += outputs.loss.item() * valid_tokens
         total_tokens += valid_tokens
 
@@ -82,5 +90,7 @@ def evaluate_wikitext2_ppl(
 
     if was_training:
         model.train()
+    if original_use_cache is not None:
+        model.config.use_cache = original_use_cache
 
     return ppl
