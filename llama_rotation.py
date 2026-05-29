@@ -246,6 +246,14 @@ def add_headwise_online_hadamard_to_linear(module, num_heads, head_dim, block_si
 
 
 @torch.no_grad()
+def add_value_output_hadamard_to_attention(attn, block_size=None, seed=0):
+    rotate_weight_output_random_hadamard(attn.v_proj, block_size, seed)
+    rotate_weight_input_random_hadamard(attn.o_proj, block_size, seed)
+    attn.v_output_had_block_size = block_size
+    attn.v_output_had_seed = seed
+
+
+@torch.no_grad()
 def rotate_llama_model(
     model,
     *,
@@ -258,6 +266,7 @@ def rotate_llama_model(
     hidden_size = model.config.hidden_size
     block_size = resolve_rotation_block_size(rotation_block_size, hidden_size, bfp_block_size)
     num_heads = getattr(model.config, "num_attention_heads", None)
+    num_key_value_heads = getattr(model.config, "num_key_value_heads", num_heads)
     if num_heads is None:
         raise ValueError("model.config.num_attention_heads is required for o_proj rotation.")
     if hidden_size % num_heads != 0:
@@ -277,15 +286,18 @@ def rotate_llama_model(
         rotate_weight_output_random_hadamard(layer.mlp.down_proj, block_size, seed)
 
         if online_o_proj_had:
-            if block_size is None:
-                add_online_hadamard_to_linear(layer.self_attn.o_proj, block_size)
+            if num_key_value_heads == num_heads:
+                add_value_output_hadamard_to_attention(layer.self_attn, block_size, seed)
             else:
-                add_headwise_online_hadamard_to_linear(
-                    layer.self_attn.o_proj,
-                    num_heads,
-                    head_dim,
-                    block_size,
-                )
+                if block_size is None:
+                    add_online_hadamard_to_linear(layer.self_attn.o_proj, block_size)
+                else:
+                    add_headwise_online_hadamard_to_linear(
+                        layer.self_attn.o_proj,
+                        num_heads,
+                        head_dim,
+                        block_size,
+                    )
         if online_down_proj_had:
             add_online_hadamard_to_linear(layer.mlp.down_proj, block_size)
 

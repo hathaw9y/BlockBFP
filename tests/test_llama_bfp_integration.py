@@ -49,6 +49,8 @@ class LlamaBFPIntegrationTest(unittest.TestCase):
         self.assertEqual(counts["v"], config.num_hidden_layers)
         self.assertEqual(counts["k"], config.num_hidden_layers)
         self.assertTrue(model.model.layers[0].self_attn.bfp_k_qk_online_had)
+        self.assertTrue(hasattr(model.model.layers[0].self_attn, "v_output_had_block_size"))
+        self.assertFalse(hasattr(model.model.layers[0].self_attn.o_proj, "_online_hadamard_handle"))
 
 
 if __name__ == "__main__":

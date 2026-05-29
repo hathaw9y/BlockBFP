@@ -13,6 +13,8 @@ from llama_rotation import (
     apply_rotation_to_last_dim,
     build_rotation_matrix,
     resolve_rotation_block_size,
+    rotate_weight_input_random_hadamard,
+    rotate_weight_output_random_hadamard,
     rotate_weight_input,
     rotate_weight_output,
 )
@@ -106,6 +108,24 @@ class LlamaRotationTest(unittest.TestCase):
             block_size=2,
         )
         actual = linear(x)
+
+        self.assertTrue(torch.allclose(actual, expected, atol=1e-6))
+
+    def test_v_output_rotation_replaces_o_proj_online_rotation(self):
+        torch.manual_seed(0)
+        v_proj = torch.nn.Linear(8, 8, bias=False)
+        o_proj = torch.nn.Linear(8, 5, bias=False)
+        hidden = torch.randn(2, 3, 8)
+        attn = torch.softmax(torch.randn(2, 3, 3), dim=-1)
+
+        value = v_proj(hidden)
+        expected = o_proj(attn @ value)
+
+        rotate_weight_output_random_hadamard(v_proj, block_size=2, seed=7)
+        rotate_weight_input_random_hadamard(o_proj, block_size=2, seed=7)
+
+        rotated_value = v_proj(hidden)
+        actual = o_proj(attn @ rotated_value)
 
         self.assertTrue(torch.allclose(actual, expected, atol=1e-6))
 
