@@ -24,6 +24,7 @@ def parse_args():
     parser.add_argument("--bfp-gptq-block-size", type=int, default=32)
     parser.add_argument("--bfp-gptq-mantissa-bits", type=int, default=5)
     parser.add_argument("--bfp-gptq-lambda", type=float, default=1e-4)
+    parser.add_argument("--bfp-gptq-no-weight-quant", action="store_true")
     parser.add_argument("--bfp-gptq-calib-samples", type=int, default=128)
     parser.add_argument("--bfp-gptq-calib-seqlen", type=int, default=2048)
     parser.add_argument("--bfp-gptq-calib-seed", type=int, default=0)
@@ -69,6 +70,7 @@ def main():
         block_size=args.bfp_gptq_block_size,
         mantissa_bits=args.bfp_gptq_mantissa_bits,
         lambda_reg=args.bfp_gptq_lambda,
+        quantize_weight=not args.bfp_gptq_no_weight_quant,
     )
 
     output = Path(args.output)
@@ -85,6 +87,7 @@ def main():
             "bfp_gptq_block_size": args.bfp_gptq_block_size,
             "bfp_gptq_mantissa_bits": args.bfp_gptq_mantissa_bits,
             "bfp_gptq_lambda": args.bfp_gptq_lambda,
+            "bfp_gptq_quantize_weight": not args.bfp_gptq_no_weight_quant,
             "bfp_gptq_calib_split": args.bfp_gptq_calib_split,
             "bfp_gptq_calib_samples": args.bfp_gptq_calib_samples,
             "bfp_gptq_calib_seqlen": args.bfp_gptq_calib_seqlen,

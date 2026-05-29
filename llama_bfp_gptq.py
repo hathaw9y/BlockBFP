@@ -53,6 +53,7 @@ def correct_and_quantize_weight_bfp_gptq(
     block_size=32,
     mantissa_bits=5,
     lambda_reg=1e-4,
+    quantize_weight=True,
 ):
     """Correct activation-BFP error into weight, then BFP-quantize weight."""
     out_features, in_features = weight.shape
@@ -89,11 +90,14 @@ def correct_and_quantize_weight_bfp_gptq(
         delta_W = W_b @ act_err @ X_Q_b.t() @ H_inv
         W_b_corrected = W_b + delta_W
 
-        W_b_quant = quant_bfp_mantissa(
-            W_b_corrected.t(),
-            block_size=bs,
-            mantissa_bits=mantissa_bits,
-        ).t()
+        if quantize_weight:
+            W_b_quant = quant_bfp_mantissa(
+                W_b_corrected.t(),
+                block_size=bs,
+                mantissa_bits=mantissa_bits,
+            ).t()
+        else:
+            W_b_quant = W_b_corrected
         W_Q[:, start:end] = W_b_quant[:, inv_order]
 
     return W_Q.to(dtype=weight.dtype)
@@ -288,6 +292,7 @@ def apply_bfp_gptq_to_llama(
     block_size=32,
     mantissa_bits=5,
     lambda_reg=1e-4,
+    quantize_weight=True,
     include_lm_head=False,
     show_progress=True,
 ):
@@ -303,6 +308,7 @@ def apply_bfp_gptq_to_llama(
             block_size=block_size,
             mantissa_bits=mantissa_bits,
             lambda_reg=lambda_reg,
+            quantize_weight=quantize_weight,
         )
         corrected += 1
 
@@ -316,6 +322,7 @@ def correct_and_quantize_weight_bfp_gptq_from_stats(
     *,
     mantissa_bits=5,
     lambda_reg=1e-4,
+    quantize_weight=True,
 ):
     out_features, in_features = weight.shape
     if stats["in_features"] != in_features:
@@ -342,11 +349,14 @@ def correct_and_quantize_weight_bfp_gptq_from_stats(
 
         H_inv = cholesky_inverse_stable(H, lambda_reg=lambda_reg)
         W_b_corrected = W_b + W_b @ cross @ H_inv
-        W_b_quant = quant_bfp_mantissa(
-            W_b_corrected.t(),
-            block_size=bs,
-            mantissa_bits=mantissa_bits,
-        ).t()
+        if quantize_weight:
+            W_b_quant = quant_bfp_mantissa(
+                W_b_corrected.t(),
+                block_size=bs,
+                mantissa_bits=mantissa_bits,
+            ).t()
+        else:
+            W_b_quant = W_b_corrected
         W_Q[:, start:end] = W_b_quant[:, inv_order]
 
     return W_Q.to(dtype=weight.dtype)
@@ -359,6 +369,7 @@ def apply_bfp_gptq_stats_to_llama(
     *,
     mantissa_bits=5,
     lambda_reg=1e-4,
+    quantize_weight=True,
     include_lm_head=False,
     show_progress=True,
 ):
@@ -373,6 +384,7 @@ def apply_bfp_gptq_stats_to_llama(
             stats[name],
             mantissa_bits=mantissa_bits,
             lambda_reg=lambda_reg,
+            quantize_weight=quantize_weight,
         )
         corrected += 1
 
@@ -392,6 +404,7 @@ def calibrate_and_apply_bfp_gptq_to_llama(
     block_size=32,
     mantissa_bits=5,
     lambda_reg=1e-4,
+    quantize_weight=True,
     include_lm_head=False,
     show_progress=True,
 ):
@@ -412,6 +425,7 @@ def calibrate_and_apply_bfp_gptq_to_llama(
         stats,
         mantissa_bits=mantissa_bits,
         lambda_reg=lambda_reg,
+        quantize_weight=quantize_weight,
         include_lm_head=include_lm_head,
         show_progress=show_progress,
     )

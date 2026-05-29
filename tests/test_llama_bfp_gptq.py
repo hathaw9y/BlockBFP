@@ -55,6 +55,29 @@ class LlamaBFPGPTQTest(unittest.TestCase):
 
         self.assertLessEqual(corrected_err, naive_err * 1.05)
 
+    def test_correction_only_keeps_fp_weight_without_bfp_weight_quant(self):
+        torch.manual_seed(2)
+        W = torch.randn(16, 32)
+        X = torch.randn(32, 256)
+        X_Q = quant_bfp_mantissa(X.t(), block_size=32, mantissa_bits=5).t()
+
+        W_corrected = correct_and_quantize_weight_bfp_gptq(
+            W,
+            X,
+            block_size=32,
+            mantissa_bits=5,
+            lambda_reg=1e-3,
+            quantize_weight=False,
+        )
+
+        target = W @ X
+        naive_err = torch.linalg.norm(target - W @ X_Q)
+        corrected_err = torch.linalg.norm(target - W_corrected @ X_Q)
+
+        self.assertEqual(W_corrected.shape, W.shape)
+        self.assertTrue(torch.all(torch.isfinite(W_corrected)))
+        self.assertLessEqual(corrected_err, naive_err)
+
     def test_stats_path_matches_activation_path_shape(self):
         torch.manual_seed(1)
         W = torch.randn(8, 16)
