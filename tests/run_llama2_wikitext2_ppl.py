@@ -14,9 +14,9 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-name", default="meta-llama/Llama-2-7b-hf")
     parser.add_argument("--split", default="test")
-    parser.add_argument("--max-length", type=int, default=1024)
-    parser.add_argument("--stride", type=int, default=512)
-    parser.add_argument("--max-eval-tokens", type=int, default=1024)
+    parser.add_argument("--max-length", type=int, default=2048)
+    parser.add_argument("--stride", type=int, default=2048)
+    parser.add_argument("--max-eval-tokens", type=int, default=0)
     parser.add_argument("--local-files-only", action="store_true")
     return parser.parse_args()
 
