@@ -14,7 +14,7 @@ def main():
     model.eval()
 
     bfp_enabled = getattr(args, "bfp", False)
-    if args.rotate or bfp_enabled:
+    if args.rotate:
         fuse_llama_model(model)
         rotate_llama_model(
             model,

@@ -62,9 +62,9 @@ def main():
 
     model = AutoModelForCausalLM.from_pretrained(args.model_name, **model_kwargs)
     quant_or_qk_enabled = args.bfp or args.v_bits is not None or args.k_bits is not None or args.qk_online_had_only
-    if args.fuse or args.rotate or quant_or_qk_enabled:
+    if args.fuse or args.rotate:
         fuse_llama_model(model)
-    if args.rotate or quant_or_qk_enabled:
+    if args.rotate:
         rotate_llama_model(
             model,
             rotation_block_size=args.rotation_block_size,
@@ -103,9 +103,9 @@ def main():
         max_eval_tokens=max_eval_tokens,
     )
     if args.qk_online_had_only and not args.bfp and args.v_bits is None and args.k_bits is None:
-        fuse_label = "fused+rotated+qk-had"
+        fuse_label = "rotated+qk-had" if args.rotate else "qk-had"
     elif quant_or_qk_enabled:
-        fuse_label = "fused+rotated+bfp"
+        fuse_label = "rotated+bfp" if args.rotate else "bfp"
     elif args.rotate:
         fuse_label = "fused+rotated"
     elif args.fuse:
