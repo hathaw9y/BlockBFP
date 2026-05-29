@@ -29,6 +29,8 @@ def parse_args():
     parser.add_argument("--no-online-o-proj-had", action="store_true")
     parser.add_argument("--no-online-down-proj-had", action="store_true")
     parser.add_argument("--bfp", action="store_true")
+    parser.add_argument("--a-bits", type=int, default=4)
+    parser.add_argument("--a-clip-ratio", type=float, default=1.0)
     parser.add_argument("--v-bits", type=int, default=None)
     parser.add_argument("--v-groupsize", type=int, default=-1)
     parser.add_argument("--v-clip-ratio", type=float, default=1.0)
@@ -106,6 +108,8 @@ def main():
         calib_seed=args.bfp_gptq_calib_seed,
         block_size=args.bfp_gptq_block_size,
         mantissa_bits=args.bfp_gptq_mantissa_bits,
+        activation_bits=args.a_bits,
+        activation_clip_ratio=args.a_clip_ratio,
         lambda_reg=args.bfp_gptq_lambda,
         quantize_weight=not args.bfp_gptq_no_weight_quant,
         calib_mode=args.bfp_gptq_calib_mode,
@@ -125,6 +129,8 @@ def main():
             "rotation_seed": args.rotation_seed,
             "runtime_bfp": args.bfp,
             "runtime_activation_bfp": not args.no_bfp_gptq_forward_activations,
+            "runtime_activation_bits": args.a_bits,
+            "runtime_activation_clip_ratio": args.a_clip_ratio,
             "runtime_v_bits": v_bits,
             "runtime_v_groupsize": args.v_groupsize,
             "runtime_v_clip_ratio": args.v_clip_ratio,

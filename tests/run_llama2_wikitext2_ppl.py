@@ -111,6 +111,8 @@ def main():
             calib_seed=args.bfp_gptq_calib_seed,
             block_size=args.bfp_gptq_block_size,
             mantissa_bits=args.bfp_gptq_mantissa_bits,
+            activation_bits=args.a_bits,
+            activation_clip_ratio=args.a_clip_ratio,
             lambda_reg=args.bfp_gptq_lambda,
             quantize_weight=not args.bfp_gptq_no_weight_quant,
             calib_mode=args.bfp_gptq_calib_mode,

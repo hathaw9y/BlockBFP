@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 from datasets import load_dataset
+from llama_bfp import bfp_fake_quant
 from tqdm.auto import tqdm
 
 
@@ -146,7 +147,24 @@ def _init_stats(in_features, block_size, device):
     return {"in_features": in_features, "block_size": block_size, "blocks": blocks}
 
 
-def _make_stats_hook(name, store, block_size, mantissa_bits, quantize_input=False):
+def _quant_activation_bfp(x, *, block_size, activation_bits=4, activation_clip_ratio=1.0):
+    return bfp_fake_quant(
+        x,
+        bits=activation_bits,
+        block_size=block_size,
+        clip_ratio=activation_clip_ratio,
+    )
+
+
+def _make_stats_hook(
+    name,
+    store,
+    block_size,
+    mantissa_bits,
+    quantize_input=False,
+    activation_bits=4,
+    activation_clip_ratio=1.0,
+):
     def hook(module, inputs):
         if len(inputs) == 0:
             return
@@ -160,7 +178,12 @@ def _make_stats_hook(name, store, block_size, mantissa_bits, quantize_input=Fals
             end = min(start + block_size, x.shape[1])
             X_b = x[:, start:end].t().contiguous()
             bs = end - start
-            X_Q_b = quant_bfp_mantissa(X_b.t(), block_size=bs, mantissa_bits=mantissa_bits).t()
+            X_Q_b = _quant_activation_bfp(
+                X_b.t(),
+                block_size=bs,
+                activation_bits=activation_bits,
+                activation_clip_ratio=activation_clip_ratio,
+            ).t()
             block = stats["blocks"][block_idx]
             block["cross"] += (X_b - X_Q_b) @ X_Q_b.t()
             block["hessian"] += 2 * (X_Q_b @ X_Q_b.t())
@@ -169,10 +192,11 @@ def _make_stats_hook(name, store, block_size, mantissa_bits, quantize_input=Fals
 
         if quantize_input:
             return (
-                quant_bfp_mantissa(
+                _quant_activation_bfp(
                     raw_input,
                     block_size=block_size,
-                    mantissa_bits=mantissa_bits,
+                    activation_bits=activation_bits,
+                    activation_clip_ratio=activation_clip_ratio,
                 ),
                 *inputs[1:],
             )
@@ -180,15 +204,16 @@ def _make_stats_hook(name, store, block_size, mantissa_bits, quantize_input=Fals
     return hook
 
 
-def _make_activation_quant_hook(block_size, mantissa_bits):
+def _make_activation_quant_hook(block_size, activation_bits=4, activation_clip_ratio=1.0):
     def hook(module, inputs):
         if len(inputs) == 0:
             return
         return (
-            quant_bfp_mantissa(
+            _quant_activation_bfp(
                 inputs[0],
                 block_size=block_size,
-                mantissa_bits=mantissa_bits,
+                activation_bits=activation_bits,
+                activation_clip_ratio=activation_clip_ratio,
             ),
             *inputs[1:],
         )
@@ -269,13 +294,24 @@ def collect_llama_bfp_gptq_stats(
     seed=0,
     block_size=32,
     mantissa_bits=5,
+    activation_bits=4,
+    activation_clip_ratio=1.0,
     include_lm_head=False,
     show_progress=True,
 ):
     targets = dict(_iter_target_linears(model, include_lm_head=include_lm_head))
     stats = {}
     handles = [
-        module.register_forward_pre_hook(_make_stats_hook(name, stats, block_size, mantissa_bits))
+        module.register_forward_pre_hook(
+            _make_stats_hook(
+                name,
+                stats,
+                block_size,
+                mantissa_bits,
+                activation_bits=activation_bits,
+                activation_clip_ratio=activation_clip_ratio,
+            )
+        )
         for name, module in targets.items()
     ]
 
@@ -420,6 +456,8 @@ def calibrate_and_apply_bfp_gptq_to_llama_layerwise(
     calib_seed=0,
     block_size=32,
     mantissa_bits=5,
+    activation_bits=4,
+    activation_clip_ratio=1.0,
     lambda_reg=1e-4,
     quantize_weight=True,
     quantize_forward_activations=True,
@@ -472,6 +510,8 @@ def calibrate_and_apply_bfp_gptq_to_llama_layerwise(
                         block_size,
                         mantissa_bits,
                         quantize_input=quantize_forward_activations,
+                        activation_bits=activation_bits,
+                        activation_clip_ratio=activation_clip_ratio,
                     )
                 )
                 for name, module in targets
@@ -508,7 +548,11 @@ def calibrate_and_apply_bfp_gptq_to_llama_layerwise(
             if quantize_forward_activations:
                 quant_handles = [
                     module.register_forward_pre_hook(
-                        _make_activation_quant_hook(block_size, mantissa_bits)
+                        _make_activation_quant_hook(
+                            block_size,
+                            activation_bits=activation_bits,
+                            activation_clip_ratio=activation_clip_ratio,
+                        )
                     )
                     for _, module in targets
                 ]
@@ -542,6 +586,8 @@ def calibrate_and_apply_bfp_gptq_to_llama(
     calib_seed=0,
     block_size=32,
     mantissa_bits=5,
+    activation_bits=4,
+    activation_clip_ratio=1.0,
     lambda_reg=1e-4,
     quantize_weight=True,
     include_lm_head=False,
@@ -561,6 +607,8 @@ def calibrate_and_apply_bfp_gptq_to_llama(
             calib_seed=calib_seed,
             block_size=block_size,
             mantissa_bits=mantissa_bits,
+            activation_bits=activation_bits,
+            activation_clip_ratio=activation_clip_ratio,
             lambda_reg=lambda_reg,
             quantize_weight=quantize_weight,
             quantize_forward_activations=quantize_forward_activations,
@@ -578,6 +626,8 @@ def calibrate_and_apply_bfp_gptq_to_llama(
         seed=calib_seed,
         block_size=block_size,
         mantissa_bits=mantissa_bits,
+        activation_bits=activation_bits,
+        activation_clip_ratio=activation_clip_ratio,
         include_lm_head=include_lm_head,
         show_progress=show_progress,
     )
