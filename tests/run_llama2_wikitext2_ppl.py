@@ -7,7 +7,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from main import evaluate_wikitext2_ppl
+from ppl_eval import evaluate_wikitext2_ppl
 
 
 def parse_args():
