@@ -23,6 +23,13 @@ def resolve_bfp_block_size(groupsize):
     return BFP_DEFAULT_BLOCK_SIZE if groupsize == -1 else groupsize
 
 
+def clamp_to_dtype_range(x, dtype):
+    if not torch.is_floating_point(x):
+        return x
+    finfo = torch.finfo(dtype)
+    return torch.clamp(x, min=finfo.min, max=finfo.max)
+
+
 def bfp_fake_quant(x, bits=4, block_size=BFP_DEFAULT_BLOCK_SIZE, clip_ratio=1.0):
     if bits < 2:
         raise ValueError(f"BFP bits must be at least 2, got {bits}.")
@@ -235,8 +242,9 @@ def _build_k_bfp_forward(attn, bits, block_size, clip_ratio, qk_online_had):
             attn_weights = attn_weights + causal_mask.to(dtype=attn_weights.dtype)
 
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32)
+        attn_weights = torch.nan_to_num(attn_weights, nan=0.0, posinf=1.0, neginf=0.0)
         attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-        attn_output = torch.matmul(attn_weights.to(value_states.dtype), value_states)
+        attn_output = torch.matmul(attn_weights, value_states.float())
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
             raise ValueError(
@@ -246,6 +254,13 @@ def _build_k_bfp_forward(attn, bits, block_size, clip_ratio, qk_online_had):
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(bsz, q_len, -1)
+        attn_output = clamp_to_dtype_range(attn_output, self.o_proj.weight.dtype)
+        attn_output = torch.nan_to_num(
+            attn_output,
+            nan=0.0,
+            posinf=torch.finfo(self.o_proj.weight.dtype).max,
+            neginf=torch.finfo(self.o_proj.weight.dtype).min,
+        ).to(dtype=self.o_proj.weight.dtype)
 
         if self.config.pretraining_tp > 1:
             attn_output = attn_output.split(self.hidden_size // self.config.pretraining_tp, dim=2)

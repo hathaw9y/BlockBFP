@@ -12,6 +12,7 @@ from llama_bfp import (
     add_bfp_to_llama,
     add_output_bfp_to_linear,
     bfp_fake_quant,
+    clamp_to_dtype_range,
     resolve_bfp_block_size,
 )
 from llama_rotation import apply_hadamard_to_last_dim
@@ -88,6 +89,13 @@ class LlamaBFPTest(unittest.TestCase):
         scores = torch.matmul(query.float(), key.float().transpose(2, 3)) / (128 ** 0.5)
 
         self.assertTrue(torch.all(torch.isfinite(scores)))
+
+    def test_clamp_to_dtype_range_prevents_fp16_inf_on_cast(self):
+        x = torch.tensor([1e8, -1e8, 1.0], dtype=torch.float32)
+
+        actual = clamp_to_dtype_range(x, torch.float16).to(torch.float16)
+
+        self.assertTrue(torch.all(torch.isfinite(actual)))
 
     def test_qk_online_hadamard_preserves_attention_scores(self):
         torch.manual_seed(0)
