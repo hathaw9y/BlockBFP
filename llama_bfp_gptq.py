@@ -112,33 +112,16 @@ def _iter_target_linears(model, include_lm_head=False):
             yield name, module
 
 
-def _make_capture_hook(name, store, max_samples_per_layer):
-    def hook(module, inputs):
-        if len(inputs) == 0:
-            return
-        x = inputs[0].detach()
-        x = x.reshape(-1, x.shape[-1]).float().cpu()
-        if name in store:
-            remaining = max_samples_per_layer - store[name].shape[0]
-            if remaining <= 0:
-                return
-            store[name] = torch.cat([store[name], x[:remaining]], dim=0)
-        else:
-            store[name] = x[:max_samples_per_layer]
-
-    return hook
-
-
-def _init_stats(in_features, block_size):
+def _init_stats(in_features, block_size, device):
     blocks = []
     for start in range(0, in_features, block_size):
         end = min(start + block_size, in_features)
         bs = end - start
         blocks.append(
             {
-                "cross": torch.zeros(bs, bs, dtype=torch.float64),
-                "hessian": torch.zeros(bs, bs, dtype=torch.float64),
-                "magnitude": torch.zeros(bs, dtype=torch.float64),
+                "cross": torch.zeros(bs, bs, device=device, dtype=torch.float32),
+                "hessian": torch.zeros(bs, bs, device=device, dtype=torch.float32),
+                "magnitude": torch.zeros(bs, device=device, dtype=torch.float32),
                 "count": 0,
             }
         )
@@ -149,9 +132,9 @@ def _make_stats_hook(name, store, block_size, mantissa_bits):
     def hook(module, inputs):
         if len(inputs) == 0:
             return
-        x = inputs[0].detach().reshape(-1, inputs[0].shape[-1]).float().cpu()
+        x = inputs[0].detach().reshape(-1, inputs[0].shape[-1]).float()
         if name not in store:
-            store[name] = _init_stats(x.shape[1], block_size)
+            store[name] = _init_stats(x.shape[1], block_size, x.device)
 
         stats = store[name]
         for block_idx, start in enumerate(range(0, x.shape[1], block_size)):
@@ -160,9 +143,9 @@ def _make_stats_hook(name, store, block_size, mantissa_bits):
             bs = end - start
             X_Q_b = quant_bfp_mantissa(X_b.t(), block_size=bs, mantissa_bits=mantissa_bits).t()
             block = stats["blocks"][block_idx]
-            block["cross"] += ((X_b - X_Q_b) @ X_Q_b.t()).double()
-            block["hessian"] += (2 * (X_Q_b @ X_Q_b.t())).double()
-            block["magnitude"] += X_b.abs().sum(dim=1).double()
+            block["cross"] += (X_b - X_Q_b) @ X_Q_b.t()
+            block["hessian"] += 2 * (X_Q_b @ X_Q_b.t())
+            block["magnitude"] += X_b.abs().sum(dim=1)
             block["count"] += X_b.shape[1]
 
     return hook
@@ -234,85 +217,6 @@ def collect_llama_bfp_gptq_stats(
             model.train()
 
     return stats
-
-
-@torch.no_grad()
-def collect_llama_linear_inputs(
-    model,
-    tokenizer,
-    *,
-    split="train",
-    nsamples=128,
-    seqlen=2048,
-    seed=0,
-    max_samples_per_layer=4096,
-    include_lm_head=False,
-    show_progress=True,
-):
-    targets = dict(_iter_target_linears(model, include_lm_head=include_lm_head))
-    captured = {}
-    handles = [
-        module.register_forward_pre_hook(_make_capture_hook(name, captured, max_samples_per_layer))
-        for name, module in targets.items()
-    ]
-
-    was_training = model.training
-    original_use_cache = getattr(model.config, "use_cache", None)
-    model.eval()
-    if original_use_cache is not None:
-        model.config.use_cache = False
-
-    try:
-        dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split=split)
-        text = "\n\n".join(dataset["text"])
-        input_ids = tokenizer(text, return_tensors="pt").input_ids
-        device = next(model.parameters()).device
-        total_len = input_ids.shape[1]
-        starts = sample_calibration_starts(total_len, seqlen=seqlen, nsamples=nsamples, seed=seed)
-        iterator = tqdm(starts, desc="BFP-GPTQ calibration", disable=not show_progress)
-        for start in iterator:
-            end = start + seqlen
-            model(input_ids[:, start:end].to(device))
-    finally:
-        for handle in handles:
-            handle.remove()
-        if original_use_cache is not None:
-            model.config.use_cache = original_use_cache
-        if was_training:
-            model.train()
-
-    return {name: value.t().contiguous() for name, value in captured.items()}
-
-
-@torch.no_grad()
-def apply_bfp_gptq_to_llama(
-    model,
-    activations,
-    *,
-    block_size=32,
-    mantissa_bits=5,
-    lambda_reg=1e-4,
-    quantize_weight=True,
-    include_lm_head=False,
-    show_progress=True,
-):
-    targets = dict(_iter_target_linears(model, include_lm_head=include_lm_head))
-    items = [(name, module) for name, module in targets.items() if name in activations]
-    iterator = tqdm(items, desc="BFP-GPTQ weights", disable=not show_progress)
-
-    corrected = 0
-    for name, module in iterator:
-        module.weight.data = correct_and_quantize_weight_bfp_gptq(
-            module.weight.data,
-            activations[name],
-            block_size=block_size,
-            mantissa_bits=mantissa_bits,
-            lambda_reg=lambda_reg,
-            quantize_weight=quantize_weight,
-        )
-        corrected += 1
-
-    return corrected
 
 
 @torch.no_grad()
@@ -400,7 +304,6 @@ def calibrate_and_apply_bfp_gptq_to_llama(
     calib_samples=128,
     calib_seqlen=2048,
     calib_seed=0,
-    max_samples_per_layer=None,
     block_size=32,
     mantissa_bits=5,
     lambda_reg=1e-4,
