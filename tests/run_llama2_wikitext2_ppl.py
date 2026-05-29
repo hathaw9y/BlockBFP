@@ -14,6 +14,12 @@ from llama_rotation import rotate_llama_model
 from ppl_eval import evaluate_wikitext2_ppl
 
 
+def resolve_optional_bits(explicit_bits, default_bits=None):
+    if explicit_bits is None:
+        return default_bits
+    return explicit_bits if explicit_bits > 0 else None
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-name", default="meta-llama/Llama-2-7b-hf")
@@ -51,6 +57,7 @@ def parse_args():
     parser.add_argument("--bfp-gptq-calib-seqlen", type=int, default=2048)
     parser.add_argument("--bfp-gptq-calib-seed", type=int, default=0)
     parser.add_argument("--bfp-gptq-calib-split", default="train")
+    parser.add_argument("--bfp-gptq-calib-mode", choices=["layerwise", "global"], default="layerwise")
     parser.add_argument("--local-files-only", action="store_true")
     return parser.parse_args()
 
@@ -106,6 +113,7 @@ def main():
             mantissa_bits=args.bfp_gptq_mantissa_bits,
             lambda_reg=args.bfp_gptq_lambda,
             quantize_weight=not args.bfp_gptq_no_weight_quant,
+            calib_mode=args.bfp_gptq_calib_mode,
         )
         mode = "correction-only fp weights" if args.bfp_gptq_no_weight_quant else "corrected+bfp weights"
         print(f"BFP-GPTQ corrected linears on fused+rotated weights ({mode}): {corrected}")
@@ -114,15 +122,18 @@ def main():
         print(f"BFP-GPTQ loaded corrected fused+rotated linears: {loaded}")
     if quant_or_qk_enabled:
         activation_bits = args.a_bits if args.bfp and not args.no_a_bfp else None
+        default_kv_bits = 4 if args.bfp else None
+        v_bits = resolve_optional_bits(args.v_bits, default_kv_bits)
+        k_bits = resolve_optional_bits(args.k_bits, default_kv_bits)
         counts = add_bfp_to_llama(
             model,
             a_bits=activation_bits,
             a_groupsize=args.a_groupsize,
             a_clip_ratio=args.a_clip_ratio,
-            v_bits=args.v_bits,
+            v_bits=v_bits,
             v_groupsize=args.v_groupsize,
             v_clip_ratio=args.v_clip_ratio,
-            k_bits=args.k_bits,
+            k_bits=k_bits,
             k_groupsize=args.k_groupsize,
             k_clip_ratio=args.k_clip_ratio,
             qk_online_had=not args.no_qk_online_had,

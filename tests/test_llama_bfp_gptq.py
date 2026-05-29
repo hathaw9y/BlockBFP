@@ -1,12 +1,14 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from llama_bfp_gptq import (
+    calibrate_and_apply_bfp_gptq_to_llama_layerwise,
     cholesky_inverse_stable,
     correct_and_quantize_weight_bfp_gptq,
     correct_and_quantize_weight_bfp_gptq_from_stats,
@@ -15,6 +17,35 @@ from llama_bfp_gptq import (
     sample_calibration_starts,
     save_bfp_gptq_weights,
 )
+
+
+class TinyTokenizer:
+    def __call__(self, text, return_tensors=None):
+        tokens = torch.arange(256).remainder(32).unsqueeze(0)
+        return type("Tokenized", (), {"input_ids": tokens})
+
+
+class TinyLayer(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.linear = torch.nn.Linear(8, 8)
+
+    def forward(self, hidden_states, **kwargs):
+        return (self.linear(hidden_states),)
+
+
+class TinyBaseModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.embed_tokens = torch.nn.Embedding(32, 8)
+        self.layers = torch.nn.ModuleList([TinyLayer(), TinyLayer()])
+
+
+class TinyCausalLM(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.config = type("Config", (), {"use_cache": True})()
+        self.model = TinyBaseModel()
 
 
 class LlamaBFPGPTQTest(unittest.TestCase):
@@ -112,6 +143,27 @@ class LlamaBFPGPTQTest(unittest.TestCase):
         self.assertEqual(len(starts), 128)
         self.assertTrue(all(0 <= start <= 10000 - 2048 for start in starts))
         self.assertEqual(starts, sample_calibration_starts(10000, 2048, 128, seed=7))
+
+    def test_layerwise_calibration_corrects_layer_linears(self):
+        model = TinyCausalLM()
+        before = model.model.layers[0].linear.weight.detach().clone()
+
+        with patch("llama_bfp_gptq.load_dataset", return_value={"text": ["tiny calibration text"]}):
+            corrected = calibrate_and_apply_bfp_gptq_to_llama_layerwise(
+                model,
+                TinyTokenizer(),
+                calib_samples=2,
+                calib_seqlen=16,
+                block_size=4,
+                mantissa_bits=5,
+                lambda_reg=1e-3,
+                quantize_weight=False,
+                show_progress=False,
+            )
+
+        self.assertEqual(corrected, 2)
+        self.assertTrue(torch.all(torch.isfinite(model.model.layers[0].linear.weight)))
+        self.assertFalse(torch.equal(model.model.layers[0].linear.weight, before))
 
     def test_save_and_load_bfp_gptq_weights(self):
         model = torch.nn.Sequential(torch.nn.Linear(4, 3), torch.nn.ReLU(), torch.nn.Linear(3, 2))

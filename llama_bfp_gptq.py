@@ -112,6 +112,24 @@ def _iter_target_linears(model, include_lm_head=False):
             yield name, module
 
 
+def _iter_layer_target_linears(layer, layer_name):
+    for name, module in layer.named_modules():
+        if isinstance(module, torch.nn.Linear):
+            full_name = f"{layer_name}.{name}" if name else layer_name
+            yield full_name, module
+
+
+def _get_llama_base_model(model):
+    return getattr(model, "model", model)
+
+
+def _module_device(module):
+    try:
+        return next(module.parameters()).device
+    except StopIteration:
+        return torch.device("cpu")
+
+
 def _init_stats(in_features, block_size, device):
     blocks = []
     for start in range(0, in_features, block_size):
@@ -167,6 +185,52 @@ def sample_calibration_starts(total_len, seqlen=2048, nsamples=128, seed=0):
     ).tolist()
 
 
+def _load_calibration_input_ids(tokenizer, *, split, seqlen, nsamples, seed):
+    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split=split)
+    text = "\n\n".join(dataset["text"])
+    input_ids = tokenizer(text, return_tensors="pt").input_ids
+    starts = sample_calibration_starts(
+        input_ids.shape[1],
+        seqlen=seqlen,
+        nsamples=nsamples,
+        seed=seed,
+    )
+    return input_ids, starts
+
+
+def _llama_layer_kwargs(base_model, hidden_states):
+    cache_position = torch.arange(hidden_states.shape[1], device=hidden_states.device)
+    position_ids = cache_position.unsqueeze(0)
+    causal_mask = None
+    if hasattr(base_model, "_update_causal_mask"):
+        causal_mask = base_model._update_causal_mask(
+            None,
+            hidden_states,
+            cache_position,
+            None,
+            False,
+        )
+
+    kwargs = {
+        "attention_mask": causal_mask,
+        "position_ids": position_ids,
+        "past_key_value": None,
+        "output_attentions": False,
+        "use_cache": False,
+        "cache_position": cache_position,
+    }
+    if hasattr(base_model, "rotary_emb"):
+        kwargs["position_embeddings"] = base_model.rotary_emb(hidden_states, position_ids)
+    return kwargs
+
+
+def _run_decoder_layer(base_model, layer, hidden_states):
+    layer_device = _module_device(layer)
+    hidden_states = hidden_states.to(device=layer_device)
+    outputs = layer(hidden_states, **_llama_layer_kwargs(base_model, hidden_states))
+    return outputs[0]
+
+
 @torch.no_grad()
 def collect_llama_bfp_gptq_stats(
     model,
@@ -217,6 +281,30 @@ def collect_llama_bfp_gptq_stats(
             model.train()
 
     return stats
+
+
+@torch.no_grad()
+def apply_bfp_gptq_stats_to_targets(
+    targets,
+    stats,
+    *,
+    mantissa_bits=5,
+    lambda_reg=1e-4,
+    quantize_weight=True,
+):
+    corrected = 0
+    for name, module in targets:
+        if name not in stats:
+            continue
+        module.weight.data = correct_and_quantize_weight_bfp_gptq_from_stats(
+            module.weight.data,
+            stats[name],
+            mantissa_bits=mantissa_bits,
+            lambda_reg=lambda_reg,
+            quantize_weight=quantize_weight,
+        )
+        corrected += 1
+    return corrected
 
 
 @torch.no_grad()
@@ -283,14 +371,114 @@ def apply_bfp_gptq_stats_to_llama(
 
     corrected = 0
     for name, module in iterator:
-        module.weight.data = correct_and_quantize_weight_bfp_gptq_from_stats(
-            module.weight.data,
-            stats[name],
+        corrected += apply_bfp_gptq_stats_to_targets(
+            [(name, module)],
+            stats,
             mantissa_bits=mantissa_bits,
             lambda_reg=lambda_reg,
             quantize_weight=quantize_weight,
         )
-        corrected += 1
+
+    return corrected
+
+
+@torch.no_grad()
+def calibrate_and_apply_bfp_gptq_to_llama_layerwise(
+    model,
+    tokenizer,
+    *,
+    calib_split="train",
+    calib_samples=128,
+    calib_seqlen=2048,
+    calib_seed=0,
+    block_size=32,
+    mantissa_bits=5,
+    lambda_reg=1e-4,
+    quantize_weight=True,
+    show_progress=True,
+):
+    base_model = _get_llama_base_model(model)
+    if not hasattr(base_model, "layers") or not hasattr(base_model, "embed_tokens"):
+        raise ValueError("Layer-wise BFP-GPTQ expects a LLaMA-style model with layers/embed_tokens.")
+
+    was_training = model.training
+    original_use_cache = getattr(model.config, "use_cache", None)
+    model.eval()
+    if original_use_cache is not None:
+        model.config.use_cache = False
+
+    try:
+        input_ids, starts = _load_calibration_input_ids(
+            tokenizer,
+            split=calib_split,
+            seqlen=calib_seqlen,
+            nsamples=calib_samples,
+            seed=calib_seed,
+        )
+
+        embed_device = _module_device(base_model.embed_tokens)
+        hidden_states = []
+        sample_iter = tqdm(starts, desc="BFP-GPTQ embeddings", disable=not show_progress)
+        for start in sample_iter:
+            ids = input_ids[:, start : start + calib_seqlen].to(embed_device)
+            hidden_states.append(base_model.embed_tokens(ids).detach().cpu())
+
+        layer_prefix = "model.layers" if getattr(model, "model", None) is base_model else "layers"
+        corrected = 0
+        layer_iter = tqdm(
+            enumerate(base_model.layers),
+            total=len(base_model.layers),
+            desc="BFP-GPTQ layers",
+            disable=not show_progress,
+        )
+        for layer_idx, layer in layer_iter:
+            layer_name = f"{layer_prefix}.{layer_idx}"
+            layer_iter.set_postfix_str(layer_name)
+            targets = list(_iter_layer_target_linears(layer, layer_name))
+            stats = {}
+            handles = [
+                module.register_forward_pre_hook(_make_stats_hook(name, stats, block_size, mantissa_bits))
+                for name, module in targets
+            ]
+            try:
+                stat_iter = tqdm(
+                    hidden_states,
+                    desc=f"{layer_name} stats",
+                    leave=False,
+                    disable=not show_progress,
+                )
+                for hidden in stat_iter:
+                    _run_decoder_layer(base_model, layer, hidden)
+            finally:
+                for handle in handles:
+                    handle.remove()
+
+            corrected += apply_bfp_gptq_stats_to_targets(
+                targets,
+                stats,
+                mantissa_bits=mantissa_bits,
+                lambda_reg=lambda_reg,
+                quantize_weight=quantize_weight,
+            )
+
+            next_hidden_states = []
+            output_iter = tqdm(
+                hidden_states,
+                desc=f"{layer_name} outputs",
+                leave=False,
+                disable=not show_progress,
+            )
+            for hidden in output_iter:
+                next_hidden_states.append(_run_decoder_layer(base_model, layer, hidden).detach().cpu())
+            hidden_states = next_hidden_states
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+    finally:
+        if original_use_cache is not None:
+            model.config.use_cache = original_use_cache
+        if was_training:
+            model.train()
 
     return corrected
 
@@ -310,7 +498,27 @@ def calibrate_and_apply_bfp_gptq_to_llama(
     quantize_weight=True,
     include_lm_head=False,
     show_progress=True,
+    calib_mode="layerwise",
 ):
+    if calib_mode == "layerwise":
+        if include_lm_head:
+            raise ValueError("Layer-wise BFP-GPTQ does not support include_lm_head=True.")
+        return calibrate_and_apply_bfp_gptq_to_llama_layerwise(
+            model,
+            tokenizer,
+            calib_split=calib_split,
+            calib_samples=calib_samples,
+            calib_seqlen=calib_seqlen,
+            calib_seed=calib_seed,
+            block_size=block_size,
+            mantissa_bits=mantissa_bits,
+            lambda_reg=lambda_reg,
+            quantize_weight=quantize_weight,
+            show_progress=show_progress,
+        )
+    if calib_mode != "global":
+        raise ValueError(f"Unknown BFP-GPTQ calibration mode: {calib_mode}.")
+
     stats = collect_llama_bfp_gptq_stats(
         model,
         tokenizer,

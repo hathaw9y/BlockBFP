@@ -29,6 +29,7 @@ def parse_args():
     parser.add_argument("--bfp-gptq-calib-seqlen", type=int, default=2048)
     parser.add_argument("--bfp-gptq-calib-seed", type=int, default=0)
     parser.add_argument("--bfp-gptq-calib-split", default="train")
+    parser.add_argument("--bfp-gptq-calib-mode", choices=["layerwise", "global"], default="layerwise")
     parser.add_argument("--local-files-only", action="store_true")
     return parser.parse_args()
 
@@ -71,6 +72,7 @@ def main():
         mantissa_bits=args.bfp_gptq_mantissa_bits,
         lambda_reg=args.bfp_gptq_lambda,
         quantize_weight=not args.bfp_gptq_no_weight_quant,
+        calib_mode=args.bfp_gptq_calib_mode,
     )
 
     output = Path(args.output)
@@ -89,6 +91,7 @@ def main():
             "bfp_gptq_lambda": args.bfp_gptq_lambda,
             "bfp_gptq_quantize_weight": not args.bfp_gptq_no_weight_quant,
             "bfp_gptq_calib_split": args.bfp_gptq_calib_split,
+            "bfp_gptq_calib_mode": args.bfp_gptq_calib_mode,
             "bfp_gptq_calib_samples": args.bfp_gptq_calib_samples,
             "bfp_gptq_calib_seqlen": args.bfp_gptq_calib_seqlen,
             "bfp_gptq_calib_seed": args.bfp_gptq_calib_seed,
