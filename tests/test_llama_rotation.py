@@ -16,11 +16,19 @@ from llama_rotation import (
     rotate_weight_input,
     rotate_weight_output,
 )
+from hadamard_utils import matmul_hadU
 
 
 class LlamaRotationTest(unittest.TestCase):
     def test_default_block_size_is_block_random_hadamard(self):
         self.assertEqual(resolve_rotation_block_size(32, hidden_size=4096), 32)
+
+    def test_hadamard_accepts_non_contiguous_input(self):
+        x = torch.randn(8, 4).t()
+
+        actual = matmul_hadU(x)
+
+        self.assertEqual(actual.shape, x.shape)
 
     def test_rotation_matrix_is_orthogonal(self):
         q = build_rotation_matrix(8, block_size=2, seed=123)

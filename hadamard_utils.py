@@ -61,14 +61,14 @@ def get_hadK(n, transpose=False):
 def matmul_hadU(X, transpose=False):
     n = X.shape[-1]
     hadK, K = get_hadK(n, transpose)
-    input = X.clone().view(-1, n, 1)
+    input = X.reshape(-1, n, 1).clone()
     output = input.clone()
     while input.shape[1] > K:
-        input = input.view(input.shape[0], input.shape[1] // 2, 2, input.shape[2])
-        output = output.view(input.shape)
+        input = input.reshape(input.shape[0], input.shape[1] // 2, 2, input.shape[2])
+        output = output.reshape(input.shape)
         output[:, :, 0, :] = input[:, :, 0, :] + input[:, :, 1, :]
         output[:, :, 1, :] = input[:, :, 0, :] - input[:, :, 1, :]
-        output = output.view(input.shape[0], input.shape[1], -1)
+        output = output.reshape(input.shape[0], input.shape[1], -1)
         (input, output) = (output, input)
     del output
 
@@ -77,9 +77,9 @@ def matmul_hadU(X, transpose=False):
         # input = torch.bmm(
         #     hadK.repeat(len(input), 1, 1).to(input.device).to(input.dtype), input)
         # Use bcast instead
-        input = hadK.view(1, K, K).to(input) @ input
+        input = hadK.reshape(1, K, K).to(input) @ input
 
-    return input.view(X.shape) / torch.tensor(n, device=X.device, dtype=X.dtype).sqrt()
+    return input.reshape(X.shape) / torch.tensor(n, device=X.device, dtype=X.dtype).sqrt()
 
 
 def matmul_hadUt(X):
@@ -108,7 +108,7 @@ def matmul_hadU_cuda(X, hadK, K):
         return fast_hadamard_transform.hadamard_transform(X.contiguous(), 1.0/torch.tensor(n).sqrt()) 
     # if transpose:
     #     hadK = hadK.T.contiguous()
-    input = X.view(-1, K, n // K)
+    input = X.reshape(-1, K, n // K)
     input = fast_hadamard_transform.hadamard_transform(input.contiguous(), 1.0/torch.tensor(n).sqrt())
     input = hadK.to(input.device).to(input.dtype) @ input
     return input.reshape(X.shape)
