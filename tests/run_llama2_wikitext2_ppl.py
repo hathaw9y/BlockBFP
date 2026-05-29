@@ -59,10 +59,10 @@ def main():
         model_kwargs["device_map"] = "auto"
 
     model = AutoModelForCausalLM.from_pretrained(args.model_name, **model_kwargs)
-    bfp_enabled = args.bfp or args.v_bits is not None or args.k_bits is not None or args.qk_online_had_only
-    if args.fuse or args.rotate or bfp_enabled:
+    quant_or_qk_enabled = args.bfp or args.v_bits is not None or args.k_bits is not None or args.qk_online_had_only
+    if args.fuse or args.rotate or quant_or_qk_enabled:
         fuse_llama_model(model)
-    if args.rotate or bfp_enabled:
+    if args.rotate or quant_or_qk_enabled:
         rotate_llama_model(
             model,
             rotation_block_size=args.rotation_block_size,
@@ -70,10 +70,11 @@ def main():
             online_o_proj_had=not args.no_online_o_proj_had,
             online_down_proj_had=not args.no_online_down_proj_had,
         )
-    if bfp_enabled:
+    if quant_or_qk_enabled:
+        activation_bits = args.a_bits if args.bfp and not args.no_a_bfp else None
         counts = add_bfp_to_llama(
             model,
-            a_bits=None if args.no_a_bfp else args.a_bits,
+            a_bits=activation_bits,
             a_groupsize=args.a_groupsize,
             a_clip_ratio=args.a_clip_ratio,
             v_bits=args.v_bits,
@@ -86,7 +87,7 @@ def main():
             force_qk_online_had=args.qk_online_had_only,
         )
         print(
-            "BFP enabled: "
+            "BFP/QK enabled: "
             f"activation={counts['activation']}, v={counts['v']}, k={counts['k']}"
         )
 
@@ -99,7 +100,9 @@ def main():
         stride=args.stride,
         max_eval_tokens=max_eval_tokens,
     )
-    if bfp_enabled:
+    if args.qk_online_had_only and not args.bfp and args.v_bits is None and args.k_bits is None:
+        fuse_label = "fused+rotated+qk-had"
+    elif quant_or_qk_enabled:
         fuse_label = "fused+rotated+bfp"
     elif args.rotate:
         fuse_label = "fused+rotated"
